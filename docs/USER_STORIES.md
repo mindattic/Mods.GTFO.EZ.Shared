@@ -1,6 +1,6 @@
 ---
 codex: 1
-project: GTFO.EZ.Shared
+project: Mods.GTFO.EZ.Shared
 code: GES
 layer: stories
 status: living
@@ -8,7 +8,7 @@ updated: 2026-10-20
 ---
 <!-- GENERATED from MindAttic.Tickets/data/Tickets.db by `tickets db render`. Do not edit: this file is rewritten from the database; change stories and tickets with the tickets CLI. -->
 
-# GTFO.EZ.Shared — User Stories
+# Mods.GTFO.EZ.Shared — User Stories
 > ✅ done (shipped & tested) · 🟡 partial · ⬜ planned. Every ✅ cites the test.
 
 ## Priority backlog
@@ -30,3 +30,4 @@ _Nothing recorded yet._
 | GES-T7 | 2026-10-24 | feature | closed | Swap Insert and Delete: Insert is now infinite health, Delete is now infinite ammo | InfiniteToggles.cs |
 | GES-T8 | 2026-10-24 | docs | closed | Put GTFO.EZ.Shared on the GTFO.EZ family's vN versioning scheme, starting at v16: new CHANGELOG.md, README Versioning section | CHANGELOG.md |
 | GES-T9 | 2026-10-24 | chore | closed | v17: drop MindAttic.GTFO.CrashTestDummies from SharedOwner.Order (it no longer carries this code); refresh README to reflect the 4-mod family and GTFO.CrashTestDummies/GTFO.SkipDrop joining the vN scheme | SharedOwner.cs |
+| GES-T10 | 2026-11-01 | chore | open | Rename repo to Mods.GTFO.EZ.Shared for mod organization (GitHub + folder + refs) | — |
