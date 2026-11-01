@@ -30,4 +30,4 @@ _Nothing recorded yet._
 | GES-T7 | 2026-10-24 | feature | closed | Swap Insert and Delete: Insert is now infinite health, Delete is now infinite ammo | InfiniteToggles.cs |
 | GES-T8 | 2026-10-24 | docs | closed | Put GTFO.EZ.Shared on the GTFO.EZ family's vN versioning scheme, starting at v16: new CHANGELOG.md, README Versioning section | CHANGELOG.md |
 | GES-T9 | 2026-10-24 | chore | closed | v17: drop MindAttic.GTFO.CrashTestDummies from SharedOwner.Order (it no longer carries this code); refresh README to reflect the 4-mod family and GTFO.CrashTestDummies/GTFO.SkipDrop joining the vN scheme | SharedOwner.cs |
-| GES-T10 | 2026-11-01 | chore | open | Rename repo to Mods.GTFO.EZ.Shared for mod organization (GitHub + folder + refs) | — |
+| GES-T10 | 2026-11-01 | chore | closed | Rename repo to Mods.GTFO.EZ.Shared for mod organization (GitHub + folder + refs) | 0ef398838c13c840ee6fd5127e955b858a607254 |
