@@ -12,9 +12,9 @@ with it, in its v17 - out of scope for a mod whose job is spawning test targets.
 | File | What it is | Compiled by |
 |---|---|---|
 | `SharedOwner.cs` | With several of the mods installed, picks the one that answers shared keys (the first installed of GTFO.EZ, GTFO.EZ.AbsurdWeapons, GTFO.EZ.AbsurdMoves, GTFO.EZ.AbsurdItems) and holds state every copy must agree on once for the whole game process. A mod whose master switch (`[0. Mod] Enabled`) is off counts as not installed. `SharedOwner.IsActive(guid)` and `SharedOwner.TryGetSetting<T>(...)` let one mod check another. | GTFO.EZ, its Absurd companions |
-| `InfiniteToggles.cs` | Insert / Delete: infinite health and ammo, announced in the event log and always in the console too. | GTFO.EZ, its Absurd companions |
+| `InfiniteToggles.cs` | Insert / Delete: infinite health and ammo for the whole team, whoever presses it - synced through the host over GTFO-API, announced in everyone's event log and always in the console too. Needs GTFO-API and `RemoteEvents.cs`. | GTFO.EZ, its Absurd companions |
 | `MessageHelper.cs` | On-screen messages for the local player: `MessageHelper.Show(text, MessageType.Warden \| EventLog \| Center \| Subtitle, seconds)`. | GTFO.EZ, its Absurd companions |
-| `RemoteEvents.cs` | `RemoteEvents.Register<T>(name, handler)`: a GTFO-API network event whose handler can't throw (an exception escaping one would hand GTFO-API's packet to the game's own receive). Needs GTFO-API. | GTFO.EZ.AbsurdWeapons, GTFO.EZ.AbsurdMoves |
+| `RemoteEvents.cs` | `RemoteEvents.Register<T>(name, handler)`: a GTFO-API network event whose handler can't throw (an exception escaping one would hand GTFO-API's packet to the game's own receive). Needs GTFO-API. | GTFO.EZ, its Absurd companions |
 | `KitLoot.cs` | Kits as consumables (GTFO.EZ.AbsurdItems' *Consumables Are Kits*, with Loot Mix's Hand Grenades and Stim Packs as extras). | GTFO.EZ.AbsurdItems |
 
 Every file is `internal` in namespace `MindAttic.GTFO.Shared`, so each mod's copy stays private to
@@ -35,6 +35,11 @@ and links the files it uses into its plugin project (`src/<Mod>/<Mod>.csproj`):
   <Compile Include="..\..\external\GTFO.EZ.Shared\SharedOwner.cs" Link="Shared\SharedOwner.cs" />
   <Compile Include="..\..\external\GTFO.EZ.Shared\InfiniteToggles.cs" Link="Shared\InfiniteToggles.cs" />
   <Compile Include="..\..\external\GTFO.EZ.Shared\MessageHelper.cs" Link="Shared\MessageHelper.cs" />
+  <Compile Include="..\..\external\GTFO.EZ.Shared\RemoteEvents.cs" Link="Shared\RemoteEvents.cs" />
+</ItemGroup>
+<!-- InfiniteToggles.cs syncs over GTFO-API (installed with BepInExPack_GTFO). -->
+<ItemGroup>
+  <Reference Include="$(BepInEx)\plugins\GTFO-API.dll" Private="false" />
 </ItemGroup>
 ```
 
