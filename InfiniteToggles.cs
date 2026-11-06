@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using Gear;
 using GTFO.API;
 using HarmonyLib;
@@ -33,11 +35,13 @@ internal static class InfiniteToggles
     private static readonly InventorySlot[] AmmoSlots = { InventorySlot.GearStandard, InventorySlot.GearSpecial, InventorySlot.GearClass };
 
     private const float SentryRefillSeconds = 0.5f;
+    private const float SyncErrorLogSeconds = 10f;
 
     private static int _lastFrame = -1;
     private static bool _ammoWasOn;
     private static float _nextSentryRefill;
-    private static bool _syncBroken;
+    private static bool _syncMissing;
+    private static float _nextSyncError;
 
     internal static void Tick()
     {
@@ -65,29 +69,52 @@ internal static class InfiniteToggles
 
     internal static string Name(string key) => key == HealthKey ? "Infinite health" : "Infinite ammo";
 
+    internal static string OnOff(bool on) => on ? "ON" : "OFF";
+
+    // Applied here straight away; what it says depends on who can confirm it for the team
+    // (InfiniteSync.Pressed: the host says so at once, a client waits for the host's answer).
     private static void Press(string key)
     {
         var on = !SharedOwner.Get(key);
         SharedOwner.Set(key, on);
-        Show($"{Name(key)}: {(on ? "ON" : "OFF")} for the whole team");
-        Sync(() => InfiniteSync.Pressed(key, on));
+        if (!Sync(() => InfiniteSync.Pressed(key, on)))
+            Show($"{Name(key)}: {OnOff(on)} - team sync unavailable, only you have it");
     }
 
-    // GTFO-API comes with BepInExPack_GTFO, so it's always there; if it somehow isn't, the toggles
-    // still work for this machine (the presser and, on the host, its bots) instead of not at all.
-    private static void Sync(Action action)
+    // GTFO-API comes with BepInExPack_GTFO, so it's always there; if it genuinely isn't (the call
+    // can't even be linked), team sync stays off for the session and the toggles still work for this
+    // machine (the presser and, on the host, its bots). Any other failure is one call going wrong:
+    // logged (at most every few seconds - this runs every frame) and tried again next time.
+    private static bool Sync(Action action)
     {
-        if (_syncBroken) return;
+        if (_syncMissing) return false;
         try
         {
             action();
+            return true;
+        }
+        catch (Exception e) when (IsMissingApi(e))
+        {
+            _syncMissing = true;
+            SharedOwner.Log.LogWarning($"Infinite health/ammo can't reach teammates (GTFO-API missing) - only this game gets it. {e.Message}");
         }
         catch (Exception e)
         {
-            _syncBroken = true;
-            SharedOwner.Log.LogWarning($"Infinite health/ammo can't reach teammates (GTFO-API unavailable?) - only this game gets it. {e.Message}");
+            if (Time.unscaledTime >= _nextSyncError)
+            {
+                _nextSyncError = Time.unscaledTime + SyncErrorLogSeconds;
+                SharedOwner.Log.LogWarning($"Infinite health/ammo team sync failed (will retry). {e}");
+            }
         }
+        return false;
     }
+
+    private static bool IsMissingApi(Exception e) => e switch
+    {
+        FileNotFoundException or FileLoadException or TypeLoadException or MissingMemberException => true,
+        TypeInitializationException { InnerException: { } inner } => IsMissingApi(inner),
+        _ => false,
+    };
 
     // Always in the console, not just as a fallback for when the event log message fails - so the
     // on/off state is never just on-screen text that scrolled past.
@@ -229,43 +256,79 @@ internal static class InfiniteToggles
 }
 
 // The team's toggle state over GTFO-API. The host is the authority: a client's press is applied on
-// the client straight away and sent to the host as a request; the host applies it and broadcasts
-// the state to everyone, naming who pressed it. The host also repeats the state every few seconds
-// while anything is on, and for the first half minute of each level, so a late joiner (or a client
-// still carrying an old state from another lobby) ends up matching. Only the owning copy calls in
-// here, and all of it is kept out of InfiniteToggles' own methods so a missing GTFO-API can't stop
-// those from compiling.
+// the client straight away (pending) and sent to the host as a request; the host applies it and
+// broadcasts the state to everyone, naming who pressed it, and only that answer is announced as
+// "for the whole team". No answer within RequestGraceSeconds means the host has no team sync (mod
+// missing, outdated or switched off), and the client is told only it has it.
+//
+// Every game says Hello to the host when a level starts (or the host changes); the host answers
+// with the state, and remembers which players speak this ProtocolVersion so every announcement can
+// name the ones who don't ("except Bob"). While in a level the host repeats the state every few
+// seconds, whatever it is (a client still carrying an old state from another lobby ends up
+// matching), and right away when someone new is in the level. Every message carries
+// SharedOwner.ProtocolVersion; one from a different version is ignored and its sender named.
+//
+// Only the owning copy calls in here, and all of it is kept out of InfiniteToggles' own methods so a
+// missing GTFO-API can't stop those from compiling.
 internal static class InfiniteSync
 {
-    private const string RequestEvent = "MindAttic.GTFO.InfiniteToggles.Request";
-    private const string StateEvent = "MindAttic.GTFO.InfiniteToggles.State";
+    // Hello's name and layout never change, so games on any later version can still tell each other
+    // apart; the others are renamed whenever their layout changes, so an older game never misreads
+    // one (GES-T12/T13's were "...Request"/"...State" without a suffix).
+    private const string HelloEvent = "MindAttic.GTFO.InfiniteToggles.Hello";
+    private const string RequestEvent = "MindAttic.GTFO.InfiniteToggles.Request.v2";
+    private const string StateEvent = "MindAttic.GTFO.InfiniteToggles.State.v2";
 
     private const byte HealthBit = 1;
     private const byte AmmoBit = 2;
+    private static readonly byte[] Bits = { HealthBit, AmmoBit };
 
     private const float HeartbeatSeconds = 5f;
-    private const float LevelStartSyncSeconds = 30f;
+    private const float RosterCheckSeconds = 0.5f;
     private const float RequestGraceSeconds = 2f;
+    private const float RehelloSeconds = 5f;
 
     // Plain fields so GTFO-API can copy them as raw bytes.
+    private struct Hello
+    {
+        public int Version; // SharedOwner.ProtocolVersion; also asks the host for the state
+    }
+
     private struct Request
     {
+        public int Version;
         public byte Key; // HealthBit or AmmoBit
         public byte On;
     }
 
     private struct State
     {
+        public int Version;
         public byte Flags;   // HealthBit | AmmoBit, whichever are on
-        public byte Changed; // the bit that just changed, 0 for a repeat
+        public byte Changed; // the bit a press just set (the answer to it), 0 for a repeat
         public ulong By;     // who pressed it (player lookup), 0 for a repeat
+        // Up to three players in the level the host hasn't heard this protocol from (0 = none):
+        // their toggles don't follow the team's.
+        public ulong Missing1, Missing2, Missing3;
     }
 
     private static bool _registered;
     private static float _lastTick = -100f;
-    private static float _syncUntil;
     private static float _nextHeartbeat;
-    private static float _requestedAt = -100f;
+    private static float _nextRosterCheck;
+
+    // Host: the protocol version each player said Hello with, and who's in the level.
+    private static readonly Dictionary<ulong, int> PeerVersions = new();
+    private static readonly HashSet<ulong> Roster = new();
+    private static readonly HashSet<ulong> FlaggedPeers = new();
+
+    // Client: a press waiting for the host's answer, per toggle, so a broadcast about the other
+    // toggle (or a repeat sent before the host saw the press) can't undo it.
+    private static readonly float[] PendingAt = { -100f, -100f, -100f };
+    private static readonly bool[] PendingOn = new bool[3];
+    private static ulong _helloTo;
+    private static float _nextHello;
+    private static int _flaggedHostVersion;
 
     internal static void Tick()
     {
@@ -273,13 +336,51 @@ internal static class InfiniteSync
 
         // Tick only runs in a level, so a gap means a new level started.
         var now = Time.unscaledTime;
-        if (now - _lastTick > 2f) _syncUntil = now + LevelStartSyncSeconds;
+        var levelStart = now - _lastTick > 2f;
         _lastTick = now;
 
-        if (!SNet.IsMaster || now < _nextHeartbeat) return;
+        if (SNet.IsMaster)
+        {
+            HostTick(now, levelStart);
+            return;
+        }
+
+        var master = SNet.Master;
+        if (master == null) return;
+        if (levelStart || master.Lookup != _helloTo) SayHello(master, now);
+        foreach (var bit in Bits)
+        {
+            if (PendingAt[bit] < 0f || now - PendingAt[bit] < RequestGraceSeconds) continue;
+            PendingAt[bit] = -100f;
+            var why = _flaggedHostVersion != 0 ? "the host's GTFO.* mods are on a different version" : "the host doesn't have team sync";
+            InfiniteToggles.Show($"{InfiniteToggles.Name(Key(bit)!)}: {InfiniteToggles.OnOff(PendingOn[bit])} - {why}, only you have it");
+        }
+    }
+
+    private static void HostTick(float now, bool levelStart)
+    {
+        var joined = false;
+        if (levelStart || now >= _nextRosterCheck)
+        {
+            _nextRosterCheck = now + RosterCheckSeconds;
+            var current = Humans();
+            foreach (var lookup in current)
+                if (!Roster.Contains(lookup)) joined = true;
+            // Someone who left the lobby has to say Hello again if they come back (maybe without the
+            // mod now). Not just out of the level: agents come and go around level changes.
+            foreach (var lookup in Roster)
+                if (!current.Contains(lookup) && !InLobby(lookup))
+                {
+                    PeerVersions.Remove(lookup);
+                    FlaggedPeers.Remove(lookup);
+                }
+            Roster.Clear();
+            Roster.UnionWith(current);
+        }
+
+        if (!joined && now < _nextHeartbeat) return;
         _nextHeartbeat = now + HeartbeatSeconds;
-        var flags = Flags();
-        if (flags != 0 || now < _syncUntil) Broadcast(flags, 0, 0);
+        Broadcast(0, 0);
     }
 
     internal static void Pressed(string key, bool on)
@@ -288,60 +389,182 @@ internal static class InfiniteSync
         var bit = Bit(key);
         if (SNet.IsMaster)
         {
-            Broadcast(Flags(), bit, SNet.LocalPlayer != null ? SNet.LocalPlayer.Lookup : 0UL);
+            Broadcast(bit, SNet.LocalPlayer != null ? SNet.LocalPlayer.Lookup : 0UL);
+            InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {InfiniteToggles.OnOff(on)} for the whole team{Except(MissingPeers())}");
             return;
         }
         var master = SNet.Master;
-        if (master == null) return;
-        _requestedAt = Time.unscaledTime;
-        NetworkAPI.InvokeEvent(RequestEvent, new Request { Key = bit, On = (byte)(on ? 1 : 0) }, master);
+        if (master == null)
+        {
+            InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {InfiniteToggles.OnOff(on)} - no host to share it with, only you have it");
+            return;
+        }
+        PendingAt[bit] = Time.unscaledTime;
+        PendingOn[bit] = on;
+        NetworkAPI.InvokeEvent(RequestEvent, new Request { Version = SharedOwner.ProtocolVersion, Key = bit, On = (byte)(on ? 1 : 0) }, master);
+        InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {InfiniteToggles.OnOff(on)} - requested from the host...");
     }
 
+    // Marked done only once every event is registered; a failure part way is retried next frame
+    // (the ones already in are skipped).
     private static void Register()
     {
         if (_registered) return;
-        _registered = true;
+        if (!NetworkAPI.IsEventRegistered(HelloEvent)) RemoteEvents.Register<Hello>(HelloEvent, OnHello);
         if (!NetworkAPI.IsEventRegistered(RequestEvent)) RemoteEvents.Register<Request>(RequestEvent, OnRequest);
         if (!NetworkAPI.IsEventRegistered(StateEvent)) RemoteEvents.Register<State>(StateEvent, OnState);
+        _registered = true;
     }
 
-    // On the host: a client pressed Insert or Delete.
+    // ── Host ──────────────────────────────────────────────────────────────
+
+    // A player's game came into a level (or got a new host): note its version, send it the state.
+    private static void OnHello(ulong sender, Hello hello)
+    {
+        if (!SNet.IsMaster) return;
+        PeerVersions[sender] = hello.Version;
+        if (hello.Version != SharedOwner.ProtocolVersion)
+        {
+            Flag(sender, hello.Version);
+            return;
+        }
+        FlaggedPeers.Remove(sender);
+        if (SNet.TryGetPlayer(sender, out var player) && player != null) Send(player, 0, 0);
+    }
+
+    // A client pressed Insert or Delete.
     private static void OnRequest(ulong sender, Request request)
     {
         if (!SNet.IsMaster) return;
+        if (request.Version != SharedOwner.ProtocolVersion)
+        {
+            Flag(sender, request.Version);
+            return;
+        }
+        PeerVersions[sender] = request.Version;
         var key = Key(request.Key);
         if (key == null) return;
         var on = request.On != 0;
-        if (SharedOwner.Get(key) != on)
-        {
-            SharedOwner.Set(key, on);
-            InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {(on ? "ON" : "OFF")} for the whole team{By(sender)}");
-        }
-        Broadcast(Flags(), request.Key, sender);
+        SharedOwner.Set(key, on);
+        // Answered even when nothing changed, so the presser hears back.
+        Broadcast(request.Key, sender);
+        InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {InfiniteToggles.OnOff(on)} for the whole team{By(sender)}{Except(MissingPeers())}");
     }
 
-    // On a client: the team's state from the host.
+    // Once per player: their toggles won't follow the team's.
+    private static void Flag(ulong lookup, int version)
+    {
+        if (!FlaggedPeers.Add(lookup)) return;
+        InfiniteToggles.Show($"{PlayerName(lookup)}'s GTFO.* mods are on a different version (team sync v{version}, yours v{SharedOwner.ProtocolVersion}) - infinite health/ammo won't reach them");
+    }
+
+    private static void Broadcast(byte changed, ulong by) => NetworkAPI.InvokeEvent(StateEvent, MakeState(changed, by));
+
+    private static void Send(SNet_Player player, byte changed, ulong by) => NetworkAPI.InvokeEvent(StateEvent, MakeState(changed, by), player);
+
+    private static State MakeState(byte changed, ulong by)
+    {
+        var missing = MissingPeers();
+        return new State
+        {
+            Version = SharedOwner.ProtocolVersion,
+            Flags = Flags(),
+            Changed = changed,
+            By = by,
+            Missing1 = missing.Count > 0 ? missing[0] : 0,
+            Missing2 = missing.Count > 1 ? missing[1] : 0,
+            Missing3 = missing.Count > 2 ? missing[2] : 0,
+        };
+    }
+
+    // The other humans in the level (the host's own bots are its to protect).
+    private static HashSet<ulong> Humans()
+    {
+        var humans = new HashSet<ulong>();
+        foreach (var agent in PlayerManager.PlayerAgentsInLevel)
+        {
+            var owner = agent?.Owner;
+            if (owner == null || owner.IsBot || owner.IsLocal) continue;
+            humans.Add(owner.Lookup);
+        }
+        return humans;
+    }
+
+    // Humans in the level that haven't said Hello on this protocol version.
+    private static List<ulong> MissingPeers()
+    {
+        var missing = new List<ulong>();
+        foreach (var lookup in Humans())
+            if (!PeerVersions.TryGetValue(lookup, out var version) || version != SharedOwner.ProtocolVersion)
+                missing.Add(lookup);
+        return missing;
+    }
+
+    // ── Client ────────────────────────────────────────────────────────────
+
+    // Also asks the host for the state; rate-limited, since a host that lists us as missing gets one
+    // again.
+    private static void SayHello(SNet_Player master, float now)
+    {
+        if (master.Lookup == _helloTo && now < _nextHello) return;
+        _helloTo = master.Lookup;
+        _nextHello = now + RehelloSeconds;
+        _flaggedHostVersion = 0;
+        NetworkAPI.InvokeEvent(HelloEvent, new Hello { Version = SharedOwner.ProtocolVersion }, master);
+    }
+
+    // The team's state from the host.
     private static void OnState(ulong sender, State state)
     {
         if (SNet.IsMaster) return;
         var master = SNet.Master;
-        if (master != null && master.Lookup != sender) return;
-        // A repeat sent before the host saw our own press mustn't undo it for a moment.
-        if (state.Changed == 0 && Time.unscaledTime - _requestedAt < RequestGraceSeconds) return;
+        if (master == null || master.Lookup != sender) return;
+        if (state.Version != SharedOwner.ProtocolVersion)
+        {
+            if (_flaggedHostVersion == state.Version) return;
+            _flaggedHostVersion = state.Version;
+            InfiniteToggles.Show($"The host's GTFO.* mods are on a different version (team sync v{state.Version}, yours v{SharedOwner.ProtocolVersion}) - infinite health/ammo only reach you");
+            return;
+        }
 
-        foreach (var bit in new[] { HealthBit, AmmoBit })
+        var missing = new List<ulong>();
+        var local = SNet.LocalPlayer != null ? SNet.LocalPlayer.Lookup : 0UL;
+        foreach (var lookup in new[] { state.Missing1, state.Missing2, state.Missing3 })
+        {
+            if (lookup == 0) continue;
+            // The host lost our Hello (or we joined just now): say it again.
+            if (lookup == local) SayHello(master, Time.unscaledTime);
+            else missing.Add(lookup);
+        }
+
+        var now = Time.unscaledTime;
+        foreach (var bit in Bits)
         {
             var key = Key(bit)!;
             var on = (state.Flags & bit) != 0;
+            var answer = state.Changed == bit;
+            if (PendingAt[bit] >= 0f)
+            {
+                // Our press is in flight: only the host's answer to a press of this toggle settles
+                // it; a repeat, or news about the other toggle, leaves this one as pressed.
+                if (answer)
+                {
+                    PendingAt[bit] = -100f;
+                    SharedOwner.Set(key, on);
+                    InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {InfiniteToggles.OnOff(on)} for the whole team{By(state.By)}{Except(missing)}");
+                    continue;
+                }
+                if (now - PendingAt[bit] < RequestGraceSeconds) continue;
+                // The request was lost: the host's state stands.
+                PendingAt[bit] = -100f;
+            }
             if (SharedOwner.Get(key) == on) continue;
             SharedOwner.Set(key, on);
-            var by = state.Changed == bit ? By(state.By) : "";
-            InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {(on ? "ON" : "OFF")} for the whole team{by}");
+            InfiniteToggles.Show($"{InfiniteToggles.Name(key)}: {InfiniteToggles.OnOff(on)} for the whole team{(answer ? By(state.By) : "")}{Except(missing)}");
         }
     }
 
-    private static void Broadcast(byte flags, byte changed, ulong by) =>
-        NetworkAPI.InvokeEvent(StateEvent, new State { Flags = flags, Changed = changed, By = by });
+    // ── Helpers ───────────────────────────────────────────────────────────
 
     private static byte Flags() =>
         (byte)((InfiniteToggles.InfiniteHealthOn ? HealthBit : 0) | (InfiniteToggles.InfiniteAmmoOn ? AmmoBit : 0));
@@ -358,16 +581,43 @@ internal static class InfiniteSync
     // " (Name)" for whoever pressed it; nothing for yourself or someone unknown.
     private static string By(ulong lookup)
     {
+        if (lookup == 0 || (SNet.LocalPlayer != null && SNet.LocalPlayer.Lookup == lookup)) return "";
+        var name = PlayerName(lookup, "");
+        return name.Length > 0 ? $" ({name})" : "";
+    }
+
+    // " - except Bob, Ann (mod missing/outdated)" for players the toggle doesn't reach.
+    private static string Except(List<ulong> missing)
+    {
+        if (missing.Count == 0) return "";
+        var names = new List<string>();
+        foreach (var lookup in missing) names.Add(PlayerName(lookup));
+        return $" - except {string.Join(", ", names)} (GTFO.* mod missing/outdated)";
+    }
+
+    private static bool InLobby(ulong lookup)
+    {
         try
         {
-            if (lookup == 0 || (SNet.LocalPlayer != null && SNet.LocalPlayer.Lookup == lookup)) return "";
-            return SNet.TryGetPlayer(lookup, out var player) && player != null && !string.IsNullOrWhiteSpace(player.NickName)
-                ? $" ({player.NickName})"
-                : "";
+            return SNet.TryGetPlayer(lookup, out var player) && player != null;
         }
         catch (Exception)
         {
-            return "";
+            return false;
+        }
+    }
+
+    private static string PlayerName(ulong lookup, string unknown = "a player")
+    {
+        try
+        {
+            return SNet.TryGetPlayer(lookup, out var player) && player != null && !string.IsNullOrWhiteSpace(player.NickName)
+                ? player.NickName
+                : unknown;
+        }
+        catch (Exception)
+        {
+            return unknown;
         }
     }
 }

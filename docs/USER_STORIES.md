@@ -31,3 +31,7 @@ _Nothing recorded yet._
 | GES-T8 | 2026-10-24 | docs | closed | Put GTFO.EZ.Shared on the GTFO.EZ family's vN versioning scheme, starting at v16: new CHANGELOG.md, README Versioning section | CHANGELOG.md |
 | GES-T9 | 2026-10-24 | chore | closed | v17: drop MindAttic.GTFO.CrashTestDummies from SharedOwner.Order (it no longer carries this code); refresh README to reflect the 4-mod family and GTFO.CrashTestDummies/GTFO.SkipDrop joining the vN scheme | SharedOwner.cs |
 | GES-T10 | 2026-11-01 | chore | closed | Rename repo to Mods.GTFO.EZ.Shared for mod organization (GitHub + folder + refs) | 0ef398838c13c840ee6fd5127e955b858a607254 |
+| GES-T11 | 2026-11-02 | fix | closed | Bughunt sweep, two passes: find and fix real bugs across tracked source (user request 2026-11-02) | — |
+| GES-T12 | 2026-11-06 | fix | closed | Infinite health (Insert) only protects the player who pressed it; it must cover the whole team | 07d78df |
+| GES-T13 | 2026-11-06 | fix | closed | Infinite ammo: turning it on should top off all ammo first, and it should also cover throwables (grenades) and tool ammo | 62cb97a |
+| GES-T14 | 2026-11-06 | fix | open | Infinite toggles' team sync: confirm through the host before announcing 'whole team' (warn when the host has no sync / a peer is missing it), no permanent latch-off on one NetworkAPI error, always-on host heartbeat + state on join, per-toggle grace, owner chosen by highest ProtocolVersion not fixed mod order, protocol version in messages | G.EZ-T122 |

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Infinite toggles' team sync only claims "whole team" once the host confirms it** (GES-T14). A
+  client's press applies on its own game and says "requested from the host..."; the host's broadcast
+  then announces "for the whole team (Name)", and with no answer within 2 s it says the host doesn't
+  have team sync, so only the presser has it. Every game says Hello to the host at level start (which
+  also asks for the state), and announcements name any player in the level the host hasn't heard
+  the protocol from ("except Bob (GTFO.* mod missing/outdated)"). The host repeats the state every
+  5 s whenever it's in a level (not only while something is on) and right away when someone joins.
+  A press is held per toggle, so a broadcast about one toggle can't undo a pending press of the
+  other. Every message carries `SharedOwner.ProtocolVersion` (now 2); a peer on another version is
+  ignored and named. Events are renamed (`...Request.v2`/`...State.v2`, plus a fixed-layout
+  `...Hello`), so GES-T12/T13 builds never misread them. One failing GTFO-API call no longer turns
+  team sync off for the session: only GTFO-API genuinely missing does, anything else retries, and
+  event registration counts as done only once it succeeded.
+- **The shared-keys owner is the newest copy, not the first mod in a fixed order** (GES-T14).
+  `SharedOwner.ProtocolVersion` is read from every loaded copy and the highest wins (fixed order
+  breaks ties). A copy from before it (no `ProtocolVersion`) that comes first still owns, since it
+  would claim the keys anyway and two owners would double-toggle every press.
 - **Infinite health (Insert) and infinite ammo (Delete) now cover the whole team** (GES-T12). The
   toggle used to live only on the presser's game, and GTFO applies damage on the game that owns the
   player (each human's own, the host's for its bots), so only the presser was protected - and bots
