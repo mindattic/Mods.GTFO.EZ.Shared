@@ -10,6 +10,13 @@
   joiners); every game blocks damage to the players it owns, bots included, and refills its own
   player's ammo. Every player sees "Infinite health: ON for the whole team (Name)". Every mod
   compiling `InfiniteToggles.cs` now needs GTFO-API and `RemoteEvents.cs` too.
+- **Infinite ammo (Delete) tops everything off and covers grenades and tools** (GES-T13). Turning it
+  on (or a teammate turning it on) fills every magazine in the backpack, not just the gun in hand;
+  while it's on the consumable slot (Hand Grenades, glow sticks, mines...) is kept full as long as one
+  is carried, placed sentries are kept full, and the host keeps its bots' ammo full too. Spending
+  gun, tool or consumable ammo costs nothing while it's on (`PlayerAmmoStorage.UpdateAmmoInPack`/
+  `UpdateBulletsInPack` see a spend of 0), so the last grenade in a stack can't be used up between
+  two refills. Resource packs (med/ammo/tool packs) are left as they are.
 
 ## v17
 

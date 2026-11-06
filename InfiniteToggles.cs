@@ -2,6 +2,7 @@ using System;
 using Gear;
 using GTFO.API;
 using HarmonyLib;
+using Il2CppInterop.Runtime;
 using Player;
 using SNetwork;
 using UnityEngine;
@@ -9,7 +10,7 @@ using UnityEngine;
 namespace MindAttic.GTFO.Shared;
 
 // Insert toggles infinite health, Delete infinite ammo, in every GTFO.* mod, for the whole team:
-// whoever presses it, every player gets it (GES-T12). Each change is announced in the
+// whoever presses it, every player gets it (GES-T12, GES-T13). Each change is announced in the
 // event log (MessageHelper) and always in the console too, where it can't cut off a warden
 // objective. Only the owning copy (SharedOwner) reads the keys, syncs and refills ammo; the on/off
 // state is shared, so every copy's damage block and any mod's own guns (InfiniteAmmoOn) agree.
@@ -31,7 +32,11 @@ internal static class InfiniteToggles
 
     private static readonly InventorySlot[] AmmoSlots = { InventorySlot.GearStandard, InventorySlot.GearSpecial, InventorySlot.GearClass };
 
+    private const float SentryRefillSeconds = 0.5f;
+
     private static int _lastFrame = -1;
+    private static bool _ammoWasOn;
+    private static float _nextSentryRefill;
     private static bool _syncBroken;
 
     internal static void Tick()
@@ -48,7 +53,14 @@ internal static class InfiniteToggles
             if (Input.GetKeyDown(KeyCode.Delete)) Press(AmmoKey);
         }
 
-        if (InfiniteAmmoOn) Refill();
+        var ammoOn = InfiniteAmmoOn;
+        if (ammoOn)
+        {
+            // Just switched on (here or by a teammate): every magazine full too, not just the one in hand.
+            if (!_ammoWasOn) TopOffClips();
+            Refill();
+        }
+        _ammoWasOn = ammoOn;
     }
 
     internal static string Name(string key) => key == HealthKey ? "Infinite health" : "Infinite ammo";
@@ -93,39 +105,107 @@ internal static class InfiniteToggles
         SharedOwner.Log.LogInfo(message);
     }
 
-    // Tops every gear slot's reserve and the wielded gun's magazine back up to full.
+    // ── Ammo ──────────────────────────────────────────────────────────────
+
+    // Ammo types that never go down while infinite ammo is on: both guns, the tool and the
+    // consumable slot (grenades, glow sticks, mines...). Resource packs (med/ammo/tool packs) are
+    // left alone - they're supplies, not ammo.
+    internal static bool KeepsFull(AmmoType type) =>
+        (type is AmmoType.Standard or AmmoType.Special or AmmoType.Class or AmmoType.CurrentConsumable) && InfiniteAmmoOn;
+
+    // Every magazine in the backpack filled, for the local player and (host) its bots.
+    private static void TopOffClips()
+    {
+        try
+        {
+            PlayerBackpackManager.LocalBackpack?.AmmoStorage?.FillAllClips();
+            if (!SNet.IsMaster) return;
+            foreach (var agent in PlayerManager.PlayerAgentsInLevel)
+                if (IsBot(agent) && PlayerBackpackManager.TryGetBackpack(agent.Owner, out var backpack))
+                    backpack?.AmmoStorage?.FillAllClips();
+        }
+        catch (Exception e)
+        {
+            SharedOwner.Log.LogWarning($"Infinite ammo: couldn't fill every magazine. {e.Message}");
+        }
+    }
+
+    // The local player's ammo, the host's bots' ammo and every placed sentry's, all back to full.
     private static void Refill()
     {
         try
         {
-            if (!PlayerManager.TryGetLocalPlayerAgent(out var player) || player == null || !player.Alive) return;
-            var storage = PlayerBackpackManager.LocalBackpack?.AmmoStorage;
-            if (storage == null) return;
+            if (PlayerManager.TryGetLocalPlayerAgent(out var player) && player != null && player.Alive)
+                Refill(player, PlayerBackpackManager.LocalBackpack, true);
 
-            var changed = false;
-            foreach (var slot in AmmoSlots)
+            if (SNet.IsMaster)
+                foreach (var agent in PlayerManager.PlayerAgentsInLevel)
+                    if (IsBot(agent) && agent.Alive && PlayerBackpackManager.TryGetBackpack(agent.Owner, out var backpack))
+                        Refill(agent, backpack, false);
+
+            if (Time.unscaledTime >= _nextSentryRefill)
             {
-                var ammo = storage.GetInventorySlotAmmo(slot);
-                if (ammo == null || ammo.AmmoInPack >= ammo.AmmoMaxCap) continue;
-                storage.SetAmmo(ammo.AmmoType, ammo.AmmoMaxCap);
-                changed = true;
+                _nextSentryRefill = Time.unscaledTime + SentryRefillSeconds;
+                RefillSentries();
             }
-
-            var gun = player.Inventory?.WieldedItem?.TryCast<BulletWeapon>();
-            if (gun != null && gun.GetCurrentClip() < gun.ClipSize)
-            {
-                gun.SetCurrentClip(gun.ClipSize);
-                storage.SetClipAmmoInSlot(player.Inventory!.WieldedSlot);
-                changed = true;
-            }
-
-            if (!changed) return;
-            storage.UpdateAllAmmoUI();
-            storage.NeedsSync = true;
         }
         catch (Exception e)
         {
             SharedOwner.Log.LogWarning($"Infinite ammo: refill failed. {e.Message}");
+        }
+    }
+
+    private static bool IsBot(PlayerAgent? agent) => agent != null && agent.Owner != null && agent.Owner.IsBot;
+
+    // Tops every gear slot's reserve, the consumable slot and the wielded gun's magazine back up to
+    // full. Only the local player has a HUD to update.
+    private static void Refill(PlayerAgent player, PlayerBackpack? backpack, bool isLocal)
+    {
+        var storage = backpack?.AmmoStorage;
+        if (backpack == null || storage == null) return;
+
+        var changed = false;
+        foreach (var slot in AmmoSlots)
+        {
+            var ammo = storage.GetInventorySlotAmmo(slot);
+            if (ammo == null || ammo.AmmoInPack >= ammo.AmmoMaxCap) continue;
+            storage.SetAmmo(ammo.AmmoType, ammo.AmmoMaxCap);
+            changed = true;
+        }
+
+        // Grenades and the like: only while one is actually carried, or an empty slot would get a
+        // stale count that the next pickup adds to.
+        var consumable = storage.ConsumableAmmo;
+        if (consumable != null && consumable.AmmoInPack < consumable.AmmoMaxCap
+            && backpack.TryGetBackpackItem(InventorySlot.Consumable, out var item) && item != null)
+        {
+            storage.SetAmmo(AmmoType.CurrentConsumable, consumable.AmmoMaxCap);
+            changed = true;
+        }
+
+        var gun = player.Inventory?.WieldedItem?.TryCast<BulletWeapon>();
+        if (gun != null && gun.GetCurrentClip() < gun.ClipSize)
+        {
+            gun.SetCurrentClip(gun.ClipSize);
+            storage.SetClipAmmoInSlot(player.Inventory!.WieldedSlot);
+            changed = true;
+        }
+
+        if (!changed) return;
+        if (isLocal) storage.UpdateAllAmmoUI();
+        storage.NeedsSync = true;
+    }
+
+    // Placed sentries draw on their own ammo, not the backpack's. Set on every machine: the host's
+    // copy decides whether the sentry fires, each client's shows the count.
+    private static void RefillSentries()
+    {
+        foreach (var obj in UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<SentryGunInstance>()))
+        {
+            var sentry = obj?.TryCast<SentryGunInstance>();
+            if (sentry == null) continue;
+            var max = sentry.AmmoMaxCap;
+            if (max > 0f && sentry.Ammo < max) sentry.Ammo = max;
         }
     }
 
@@ -316,4 +396,27 @@ internal static class InfiniteToggles_Patches
     [HarmonyPatch(nameof(Dam_PlayerDamageLocal.ReceiveSetDead))]
     [HarmonyPrefix]
     private static bool BeforeDamage(Dam_PlayerDamageLocal __instance) => InfiniteToggles.AllowDamage(__instance);
+}
+
+// While infinite ammo is on, spending ammo of a kept-full type (InfiniteToggles.KeepsFull) costs
+// nothing: the spend is turned into 0 rather than skipped, so the game's own bookkeeping (and its
+// return value) runs as normal. The per-frame refill is the backstop; this is what stops the last
+// grenade in a stack from being used up (and the item dropped) between two refills. Every copy of
+// this code applies it; the change is the same however many times it runs.
+[HarmonyPatch(typeof(PlayerAmmoStorage))]
+internal static class InfiniteToggles_AmmoPatches
+{
+    [HarmonyPatch(nameof(PlayerAmmoStorage.UpdateAmmoInPack))]
+    [HarmonyPrefix]
+    private static void BeforeUpdateAmmo(AmmoType ammoType, ref float delta)
+    {
+        if (delta < 0f && InfiniteToggles.KeepsFull(ammoType)) delta = 0f;
+    }
+
+    [HarmonyPatch(nameof(PlayerAmmoStorage.UpdateBulletsInPack))]
+    [HarmonyPrefix]
+    private static void BeforeUpdateBullets(AmmoType ammoType, ref int bulletCount)
+    {
+        if (bulletCount < 0 && InfiniteToggles.KeepsFull(ammoType)) bulletCount = 0;
+    }
 }
